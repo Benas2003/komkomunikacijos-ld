@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	gioui.org v0.9.0
+	github.com/go-sql-driver/mysql v1.7.1
 	github.com/tarm/serial v0.0.0-20180830185346-98f6abe2eb07
 )
 

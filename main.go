@@ -33,6 +33,20 @@ type UIState struct {
 	OpenBtn        widget.Clickable
 	ClearBtn       widget.Clickable
 
+	// Database test buttons
+	TestWriteBtn  widget.Clickable
+	TestReadBtn   widget.Clickable
+	ClearDBBtn    widget.Clickable
+	LoadFromDBBtn widget.Clickable
+	SaveCSVBtn    widget.Clickable
+	SaveJSONBtn   widget.Clickable
+
+	// Database state
+	DBConnected   bool
+	DBPacketCount int
+	DBSeries      []float32
+	DBLastPacket  *StoredPacket
+
 	PortOpen bool
 }
 
@@ -50,7 +64,7 @@ func runApp() {
 	w := new(app.Window)
 	w.Option(
 		app.Title("Kompiuterinės Komunikacijos 2 Lab. Darbas"),
-		app.Size(unit.Dp(1100), unit.Dp(700)),
+		app.Size(unit.Dp(1200), unit.Dp(800)),
 	)
 
 	th := material.NewTheme()
@@ -68,10 +82,23 @@ func runApp() {
 
 	packets := make(chan Packet, 128)
 
+	// Initialize database connection
+	dsn := getDatabaseDSN()
+	db, err := NewDatabase(dsn)
+	if err != nil {
+		log.Printf("Failed to connect to database: %v", err)
+		state.DBConnected = false
+	} else {
+		state.DBConnected = true
+		log.Println("Database connected successfully")
+		defer db.Close()
+	}
+
 	go startSerialReader(
 		w,
 		packets,
 		&state,
+		db,
 	)
 
 	for {
@@ -114,7 +141,6 @@ func runApp() {
 			}
 
 			if state.OpenBtn.Clicked(gtx) {
-
 				state.PortOpen = true
 				state.LogLines = append(state.LogLines,
 					"[INFO] COM PORT opened: "+state.PortList.Value+
@@ -128,6 +154,101 @@ func runApp() {
 				state.Series = nil
 			}
 
+			// Database test button handlers
+			if state.TestWriteBtn.Clicked(gtx) && state.DBConnected && db != nil {
+				testPacket := CreateTestPacket()
+				id, err := db.InsertPacket(testPacket)
+				if err != nil {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[ERROR] Failed to write to DB: %v", err))
+				} else {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[DB] Test packet written with ID: %d", id))
+					// Update packet count
+					if count, err := db.GetPacketCount(); err == nil {
+						state.DBPacketCount = count
+					}
+				}
+				if len(state.LogLines) > logCapacity {
+					state.LogLines = state.LogLines[len(state.LogLines)-logCapacity:]
+				}
+			}
+
+			if state.TestReadBtn.Clicked(gtx) && state.DBConnected && db != nil {
+				packets, err := db.GetPackets(5) // Get last 5 packets
+				if err != nil {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[ERROR] Failed to read from DB: %v", err))
+				} else {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[DB] Retrieved %d packets from database", len(packets)))
+					for i, p := range packets {
+						if i < 3 { // Show only first 3 to avoid cluttering
+							state.LogLines = append(state.LogLines,
+								fmt.Sprintf("[DB] ID:%d Lat:%.6f Lon:%.6f Sat:%d AccZ:%.2f",
+									p.ID, p.Latitude, p.Longitude, p.Satellites, p.AccelerationZ))
+						}
+					}
+					// Update latest packet info
+					if len(packets) > 0 {
+						state.DBLastPacket = &packets[0]
+					}
+				}
+				if len(state.LogLines) > logCapacity {
+					state.LogLines = state.LogLines[len(state.LogLines)-logCapacity:]
+				}
+			}
+
+			if state.ClearDBBtn.Clicked(gtx) && state.DBConnected && db != nil {
+				err := db.DeleteAllPackets()
+				if err != nil {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[ERROR] Failed to clear DB: %v", err))
+				} else {
+					state.LogLines = append(state.LogLines, "[DB] All packets cleared from database")
+					state.DBPacketCount = 0
+					state.DBLastPacket = nil
+					state.DBSeries = nil
+				}
+				if len(state.LogLines) > logCapacity {
+					state.LogLines = state.LogLines[len(state.LogLines)-logCapacity:]
+				}
+			}
+
+			if state.LoadFromDBBtn.Clicked(gtx) && state.DBConnected && db != nil {
+				series, err := db.GetAccelerationSeries(seriesCapacity)
+				if err != nil {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[ERROR] Failed to load series from DB: %v", err))
+				} else {
+					state.DBSeries = series
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[DB] Loaded %d data points for visualization", len(series)))
+				}
+				if len(state.LogLines) > logCapacity {
+					state.LogLines = state.LogLines[len(state.LogLines)-logCapacity:]
+				}
+			}
+
+			if state.SaveCSVBtn.Clicked(gtx) && state.DBConnected && db != nil {
+				filename := GenerateExportFilename("csv")
+				err := db.SavePacketsToCSV(filename, 0) // 0 = export all packets
+				if err != nil {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[ERROR] Failed to save CSV: %v", err))
+				} else {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[EXPORT] Data saved to: %s", filename))
+				}
+				if len(state.LogLines) > logCapacity {
+					state.LogLines = state.LogLines[len(state.LogLines)-logCapacity:]
+				}
+			}
+
+			if state.SaveJSONBtn.Clicked(gtx) && state.DBConnected && db != nil {
+				filename := GenerateExportFilename("json")
+				err := db.SavePacketsToJSON(filename, 0) // 0 = export all packets
+				if err != nil {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[ERROR] Failed to save JSON: %v", err))
+				} else {
+					state.LogLines = append(state.LogLines, fmt.Sprintf("[EXPORT] Data saved to: %s", filename))
+				}
+				if len(state.LogLines) > logCapacity {
+					state.LogLines = state.LogLines[len(state.LogLines)-logCapacity:]
+				}
+			}
+
 			layoutRoot(gtx, th, &state, baudRates)
 
 			ev.Frame(gtx.Ops)
@@ -135,7 +256,7 @@ func runApp() {
 	}
 }
 
-func startSerialReader(w *app.Window, out chan Packet, state *UIState) {
+func startSerialReader(w *app.Window, out chan Packet, state *UIState, db *Database) {
 
 	baud, _ := strconv.Atoi(state.BaudList.Value)
 
@@ -180,6 +301,15 @@ func startSerialReader(w *app.Window, out chan Packet, state *UIState) {
 			out <- p
 		}
 
+		// Auto-save to database if connected
+		if db != nil {
+			go func() {
+				if _, err := db.InsertPacket(p); err != nil {
+					log.Printf("Failed to auto-save packet to database: %v", err)
+				}
+			}()
+		}
+
 		w.Invalidate()
 	}
 }
@@ -189,21 +319,23 @@ func layoutRoot(gtx layout.Context, th *material.Theme, st *UIState, baudRates [
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-
 			border := widgetBorder(gtx, color.NRGBA{R: 180, G: 0, B: 0, A: 255})
 			return border(func(gtx layout.Context) layout.Dimensions {
 				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-					layout.Flexed(0.4, func(gtx layout.Context) layout.Dimensions {
+					layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
 						return sectionPortHeader(gtx, th)
 					}),
 					layout.Flexed(0.2, func(gtx layout.Context) layout.Dimensions {
 						return sectionGPSHeader(gtx, th, st)
 					}),
-					layout.Flexed(0.2, func(gtx layout.Context) layout.Dimensions {
+					layout.Flexed(0.15, func(gtx layout.Context) layout.Dimensions {
 						return sectionTimeHeader(gtx, th, st)
 					}),
-					layout.Flexed(0.2, func(gtx layout.Context) layout.Dimensions {
+					layout.Flexed(0.15, func(gtx layout.Context) layout.Dimensions {
 						return sectionSatsHeader(gtx, th, st)
+					}),
+					layout.Flexed(0.25, func(gtx layout.Context) layout.Dimensions {
+						return sectionDBHeader(gtx, th, st)
 					}),
 				)
 			})
@@ -279,6 +411,12 @@ func leftPanel(gtx layout.Context, th *material.Theme, st *UIState, baudRates []
 			})
 		}),
 
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return databaseControls(gtx, th, st)
+			})
+		}),
+
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 			return layout.UniformInset(unit.Dp(8)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 
@@ -349,13 +487,20 @@ func rightPanel(gtx layout.Context, th *material.Theme, st *UIState) layout.Dime
 		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			inset := layout.UniformInset(unit.Dp(8))
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				title := material.H6(th, "Duomenų grafikas")
-				return title.Layout(gtx)
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						title := material.H6(th, "Duomenų grafikas (Real-time)")
+						return title.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &st.LoadFromDBBtn, "Rodyti DB duomenis")
+						return btn.Layout(gtx)
+					}),
+				)
 			})
 		}),
 
 		layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-
 			inset := layout.UniformInset(unit.Dp(16))
 			return inset.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				wPx := gtx.Constraints.Max.X
@@ -371,7 +516,13 @@ func rightPanel(gtx layout.Context, th *material.Theme, st *UIState) layout.Dime
 				c.Max.Y = hPx
 				gtx.Constraints = c
 
-				return drawGraph(gtx, st.Series, wPx, hPx)
+				// Choose which series to display
+				series := st.Series
+				if len(st.DBSeries) > 0 {
+					series = st.DBSeries
+				}
+
+				return drawGraph(gtx, series, wPx, hPx)
 			})
 		}),
 	)
@@ -480,6 +631,77 @@ func drawGraph(gtx layout.Context, series []float32, width, height int) layout.D
 	)
 
 	return layout.Dimensions{Size: image.Pt(width, height)}
+}
+
+func sectionDBHeader(gtx layout.Context, th *material.Theme, st *UIState) layout.Dimensions {
+	status := "Disconnected"
+	if st.DBConnected {
+		status = fmt.Sprintf("Connected (%d packets)", st.DBPacketCount)
+	}
+	txt := "Database:\n" + status
+	return layout.UniformInset(unit.Dp(4)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+		return material.Body2(th, txt).Layout(gtx)
+	})
+}
+
+func databaseControls(gtx layout.Context, th *material.Theme, st *UIState) layout.Dimensions {
+	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return material.Body1(th, "Database Test Controls:").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &st.TestWriteBtn, "Test Write")
+						btn.Background = color.NRGBA{R: 76, G: 175, B: 80, A: 255}
+						return btn.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Dimensions{}
+						})
+					}),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &st.TestReadBtn, "Test Read")
+						btn.Background = color.NRGBA{R: 33, G: 150, B: 243, A: 255}
+						return btn.Layout(gtx)
+					}),
+				)
+			})
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				btn := material.Button(th, &st.ClearDBBtn, "Clear Database")
+				btn.Background = color.NRGBA{R: 244, G: 67, B: 54, A: 255}
+				return btn.Layout(gtx)
+			})
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return material.Body2(th, "Export Data:").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+			return layout.Inset{Top: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &st.SaveCSVBtn, "Save CSV")
+						btn.Background = color.NRGBA{R: 255, G: 152, B: 0, A: 255} // Orange
+						return btn.Layout(gtx)
+					}),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+							return layout.Dimensions{}
+						})
+					}),
+					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(th, &st.SaveJSONBtn, "Save JSON")
+						btn.Background = color.NRGBA{R: 156, G: 39, B: 176, A: 255} // Purple
+						return btn.Layout(gtx)
+					}),
+				)
+			})
+		}),
+	)
 }
 
 func widgetBorder(gtx layout.Context, col color.NRGBA) func(func(layout.Context) layout.Dimensions) layout.Dimensions {
